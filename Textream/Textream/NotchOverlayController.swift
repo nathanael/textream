@@ -47,6 +47,7 @@ class OverlayContent {
 class NotchOverlayController: NSObject {
     private var panel: NSPanel?
     let speechRecognizer = SpeechRecognizer()
+    let handGestureController = HandGestureController()
     let overlayContent = OverlayContent()
     var onComplete: (() -> Void)?
     var onNextPage: (() -> Void)?
@@ -117,6 +118,8 @@ class NotchOverlayController: NSObject {
         if settings.listeningMode != .classic {
             speechRecognizer.start(with: text)
         }
+
+        handGestureController.start()
     }
 
     func updateContent(text: String, hasNextPage: Bool) {
@@ -136,6 +139,8 @@ class NotchOverlayController: NSObject {
         if settings.listeningMode != .classic {
             speechRecognizer.start(with: text)
         }
+
+        handGestureController.start()
     }
 
     private func screenUnderMouse() -> NSScreen? {
@@ -232,7 +237,7 @@ class NotchOverlayController: NSObject {
         self.frameTracker = tracker
         self.currentScreenID = screen.displayID
 
-        let overlayView = NotchOverlayView(content: overlayContent, speechRecognizer: speechRecognizer, menuBarHeight: menuBarHeight, baseTextHeight: textAreaHeight, maxExtraHeight: maxExtraHeight, frameTracker: tracker)
+        let overlayView = NotchOverlayView(content: overlayContent, speechRecognizer: speechRecognizer, handGesture: handGestureController, menuBarHeight: menuBarHeight, baseTextHeight: textAreaHeight, maxExtraHeight: maxExtraHeight, frameTracker: tracker)
         let contentView = NSHostingView(rootView: overlayView)
 
         // Start panel at full target size (SwiftUI animates the notch shape inside)
@@ -277,6 +282,7 @@ class NotchOverlayController: NSObject {
         let floatingView = FloatingOverlayView(
             content: overlayContent,
             speechRecognizer: speechRecognizer,
+            handGesture: handGestureController,
             baseHeight: panelHeight,
             followingCursor: true
         )
@@ -345,6 +351,7 @@ class NotchOverlayController: NSObject {
         let floatingView = FloatingOverlayView(
             content: overlayContent,
             speechRecognizer: speechRecognizer,
+            handGesture: handGestureController,
             baseHeight: panelHeight
         )
         let contentView = NSHostingView(rootView: floatingView)
@@ -377,6 +384,7 @@ class NotchOverlayController: NSObject {
         // Trigger the shrink animation
         speechRecognizer.shouldDismiss = true
         speechRecognizer.forceStop()
+        handGestureController.stop()
 
         // Wait for animation, then remove panel
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
@@ -415,6 +423,7 @@ class NotchOverlayController: NSObject {
         removeEscMonitor()
         cancellables.removeAll()
         speechRecognizer.forceStop()
+        handGestureController.stop()
         speechRecognizer.recognizedCharCount = 0
         panel?.orderOut(nil)
         panel = nil
@@ -605,6 +614,7 @@ struct DynamicIslandShape: Shape {
 struct NotchOverlayView: View {
     @Bindable var content: OverlayContent
     @Bindable var speechRecognizer: SpeechRecognizer
+    var handGesture: HandGestureController
     let menuBarHeight: CGFloat
     let baseTextHeight: CGFloat
     let maxExtraHeight: CGFloat
@@ -627,6 +637,10 @@ struct NotchOverlayView: View {
     @State private var isUserScrolling: Bool = false
     private let scrollTimer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
 
+    // Hand-gesture rewind state
+    @State private var rewindTimer: Timer?
+    @State private var resumeDelay: DispatchWorkItem?
+
     // Auto next page countdown
     @State private var countdownRemaining: Int = 0
     @State private var countdownTimer: Timer? = nil
@@ -640,6 +654,12 @@ struct NotchOverlayView: View {
 
     private var listeningMode: ListeningMode {
         NotchSettings.shared.listeningMode
+    }
+
+    private func rewindWordsPerTick(handHeight: Float) -> Int {
+        if handHeight < 0.3 { return 1 }
+        if handHeight < 0.7 { return 2 }
+        return 4
     }
 
     /// Convert fractional word index to char offset using actual word lengths
@@ -797,6 +817,55 @@ struct NotchOverlayView: View {
         }
         .onChange(of: content.totalCharCount) { _, _ in
             timerWordProgress = 0
+        }
+        .onChange(of: handGesture.isHandRaised) { _, raised in
+            if raised {
+                resumeDelay?.cancel()
+                resumeDelay = nil
+
+                switch listeningMode {
+                case .wordTracking:
+                    speechRecognizer.pauseForRewind()
+                case .classic:
+                    isPaused = true
+                case .silencePaused:
+                    speechRecognizer.pauseForRewind()
+                    isPaused = true
+                }
+
+                rewindTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
+                    let words = rewindWordsPerTick(handHeight: handGesture.handHeight)
+                    switch listeningMode {
+                    case .wordTracking:
+                        speechRecognizer.rewindByWords(words)
+                    case .classic, .silencePaused:
+                        timerWordProgress = max(0, timerWordProgress - Double(words))
+                    }
+                }
+            } else {
+                rewindTimer?.invalidate()
+                rewindTimer = nil
+
+                switch listeningMode {
+                case .wordTracking:
+                    speechRecognizer.resumeAfterRewind()
+                case .classic:
+                    let work = DispatchWorkItem { isPaused = false }
+                    resumeDelay = work
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
+                case .silencePaused:
+                    speechRecognizer.resumeAfterRewind()
+                    let work = DispatchWorkItem { isPaused = false }
+                    resumeDelay = work
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
+                }
+            }
+        }
+        .onDisappear {
+            rewindTimer?.invalidate()
+            rewindTimer = nil
+            resumeDelay?.cancel()
+            resumeDelay = nil
         }
     }
 
@@ -1136,6 +1205,7 @@ struct GlassEffectView: NSViewRepresentable {
 struct FloatingOverlayView: View {
     @Bindable var content: OverlayContent
     @Bindable var speechRecognizer: SpeechRecognizer
+    var handGesture: HandGestureController
     let baseHeight: CGFloat
     var followingCursor: Bool = false
 
@@ -1155,8 +1225,18 @@ struct FloatingOverlayView: View {
     @State private var isUserScrolling: Bool = false
     private let scrollTimer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
 
+    // Hand-gesture rewind state
+    @State private var rewindTimer: Timer?
+    @State private var resumeDelay: DispatchWorkItem?
+
     private var listeningMode: ListeningMode {
         NotchSettings.shared.listeningMode
+    }
+
+    private func rewindWordsPerTick(handHeight: Float) -> Int {
+        if handHeight < 0.3 { return 1 }
+        if handHeight < 0.7 { return 2 }
+        return 4
     }
 
     /// Convert fractional word index to char offset using actual word lengths
@@ -1291,6 +1371,55 @@ struct FloatingOverlayView: View {
         }
         .onChange(of: content.totalCharCount) { _, _ in
             timerWordProgress = 0
+        }
+        .onChange(of: handGesture.isHandRaised) { _, raised in
+            if raised {
+                resumeDelay?.cancel()
+                resumeDelay = nil
+
+                switch listeningMode {
+                case .wordTracking:
+                    speechRecognizer.pauseForRewind()
+                case .classic:
+                    isPaused = true
+                case .silencePaused:
+                    speechRecognizer.pauseForRewind()
+                    isPaused = true
+                }
+
+                rewindTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
+                    let words = rewindWordsPerTick(handHeight: handGesture.handHeight)
+                    switch listeningMode {
+                    case .wordTracking:
+                        speechRecognizer.rewindByWords(words)
+                    case .classic, .silencePaused:
+                        timerWordProgress = max(0, timerWordProgress - Double(words))
+                    }
+                }
+            } else {
+                rewindTimer?.invalidate()
+                rewindTimer = nil
+
+                switch listeningMode {
+                case .wordTracking:
+                    speechRecognizer.resumeAfterRewind()
+                case .classic:
+                    let work = DispatchWorkItem { isPaused = false }
+                    resumeDelay = work
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
+                case .silencePaused:
+                    speechRecognizer.resumeAfterRewind()
+                    let work = DispatchWorkItem { isPaused = false }
+                    resumeDelay = work
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
+                }
+            }
+        }
+        .onDisappear {
+            rewindTimer?.invalidate()
+            rewindTimer = nil
+            resumeDelay?.cancel()
+            resumeDelay = nil
         }
     }
 
