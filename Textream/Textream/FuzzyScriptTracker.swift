@@ -1,5 +1,7 @@
 import Foundation
 
+/// Forward-only fallback tracker using fuzzy char/word matching.
+/// Does not support backward matching — always returns .forward or .hold.
 class FuzzyScriptTracker: ScriptTracker {
     private var sourceText: String = ""
     private var normalizedSource: String = ""

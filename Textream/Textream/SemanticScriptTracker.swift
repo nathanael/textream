@@ -46,12 +46,13 @@ class SemanticScriptTracker: ScriptTracker {
         segmentLock.unlock()
 
         // Embed on background queue (debounced for rapid updateText calls)
+        let segmentsToEmbed = segments  // capture by value to avoid race with main thread
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            let texts = self.segments.filter { !$0.isAnnotation }.map(\.text)
+            let texts = segmentsToEmbed.filter { !$0.isAnnotation }.map(\.text)
             let embeddings = self.embedder.embedBatch(texts)
 
-            var updated = self.segments
+            var updated = segmentsToEmbed
             var embIdx = 0
             for i in 0..<updated.count {
                 if !updated[i].isAnnotation {
@@ -286,7 +287,9 @@ class SemanticScriptTracker: ScriptTracker {
 
     func reset() {
         segments = []
+        segmentLock.lock()
         embeddedSegments = []
+        segmentLock.unlock()
         currentSegmentIndex = 0
         isEmbeddingComplete = false
         holdBuffer = []
@@ -312,6 +315,7 @@ class SemanticScriptTracker: ScriptTracker {
 
     // MARK: - Vector Math
 
+    /// Cosine similarity for L2-normalized vectors (dot product equivalent).
     private func dotProduct(_ a: [Float], _ b: [Float]) -> Float {
         guard a.count == b.count else { return 0 }
         var result: Float = 0
