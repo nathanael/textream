@@ -122,10 +122,12 @@ class NotchOverlayController: NSObject {
             speechRecognizer.start(with: text)
         }
 
-        handGestureController.onHandStateChanged = { [weak self] raised, height in
-            self?.handleHandGesture(raised: raised, height: height)
+        if settings.handGestureRewind {
+            handGestureController.onHandStateChanged = { [weak self] raised, height in
+                self?.handleHandGesture(raised: raised, height: height)
+            }
+            handGestureController.start()
         }
-        handGestureController.start()
     }
 
     private func handleHandGesture(raised: Bool, height: Float) {
@@ -223,7 +225,9 @@ class NotchOverlayController: NSObject {
             speechRecognizer.start(with: text)
         }
 
-        handGestureController.start()
+        if NotchSettings.shared.handGestureRewind {
+            handGestureController.start()
+        }
     }
 
     private func screenUnderMouse() -> NSScreen? {
