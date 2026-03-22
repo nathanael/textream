@@ -168,7 +168,9 @@ class SemanticScriptTracker: ScriptTracker {
 
         while i < words.count {
             var end = min(i + 20, words.count)
-            for j in (i + 15)..<min(i + 25, words.count) where j < words.count {
+            let searchStart = i + 15
+            let searchEnd = min(i + 25, words.count)
+            for j in searchStart..<max(searchStart, searchEnd) {
                 let word = words[j]
                 if word.hasSuffix(",") || word.hasSuffix(";") || word.hasSuffix("—") || word.hasSuffix("-") {
                     end = j + 1
