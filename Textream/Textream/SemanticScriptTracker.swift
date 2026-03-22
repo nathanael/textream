@@ -35,6 +35,7 @@ class SemanticScriptTracker: ScriptTracker {
         pendingEmbedding = nil
 
         // Segment synchronously
+        NSLog("[SemanticTracker] loadScript called, text length=%d, immediate=%d", text.count, immediate ? 1 : 0)
         segments = segment(text)
         currentSegmentIndex = 0
         isEmbeddingComplete = false
@@ -66,6 +67,7 @@ class SemanticScriptTracker: ScriptTracker {
             self.segmentLock.unlock()
 
             DispatchQueue.main.async {
+                NSLog("[SemanticTracker] Embedding complete, %d segments embedded", updated.count)
                 self.isEmbeddingComplete = true
             }
         }
@@ -211,7 +213,10 @@ class SemanticScriptTracker: ScriptTracker {
     // MARK: - Matching
 
     func match(spoken: String) -> MatchResult {
-        guard isEmbeddingComplete else { return .hold }
+        if !isEmbeddingComplete {
+            NSLog("[SemanticTracker] match called but embedding not complete yet (segments=%d)", segments.count)
+            return .hold
+        }
 
         segmentLock.lock()
         let segs = embeddedSegments
@@ -260,6 +265,10 @@ class SemanticScriptTracker: ScriptTracker {
         } else {
             direction = .hold
         }
+
+        let spokenPreview = String(spoken.prefix(60))
+        let segPreview = segs[bestIndex].text.prefix(40)
+        NSLog("[SemanticTracker] score=\(String(format: "%.3f", bestScore)) dir=\(direction) seg=\(bestIndex)/\(segs.count) spoken=\"\(spokenPreview)\" match=\"\(segPreview)\"")
 
         switch direction {
         case .forward, .backward:

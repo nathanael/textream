@@ -8,14 +8,23 @@ class SentenceEmbedder {
     private let embeddingDim: Int = 384
 
     init?() {
-        guard let modelURL = Bundle.main.url(forResource: "MiniLM", withExtension: "mlmodelc"),
-              let vocabURL = Bundle.main.url(forResource: "vocab", withExtension: "txt") else {
+        guard let modelURL = Bundle.main.url(forResource: "MiniLM", withExtension: "mlmodelc") else {
+            NSLog("[SentenceEmbedder] MiniLM.mlmodelc not found in bundle")
             return nil
         }
-        guard let model = try? MLModel(contentsOf: modelURL),
-              let tokenizer = WordPieceTokenizer(vocabURL: vocabURL, maxLength: 128) else {
+        guard let vocabURL = Bundle.main.url(forResource: "vocab", withExtension: "txt") else {
+            NSLog("[SentenceEmbedder] vocab.txt not found in bundle")
             return nil
         }
+        guard let model = try? MLModel(contentsOf: modelURL) else {
+            NSLog("[SentenceEmbedder] Failed to load MLModel from \(modelURL)")
+            return nil
+        }
+        guard let tokenizer = WordPieceTokenizer(vocabURL: vocabURL, maxLength: 128) else {
+            NSLog("[SentenceEmbedder] Failed to create WordPieceTokenizer")
+            return nil
+        }
+        NSLog("[SentenceEmbedder] Loaded successfully")
         self.model = model
         self.tokenizer = tokenizer
     }
