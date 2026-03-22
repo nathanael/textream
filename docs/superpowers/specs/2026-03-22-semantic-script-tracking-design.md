@@ -46,7 +46,7 @@ At `loadScript()` time, the script is broken into segments using a hybrid approa
 
 ### Segmentation Rules
 
-- Split on sentence boundaries (`.`, `?`, `!`, newlines)
+- Split on sentence boundaries (`.`, `?`, `!`)
 - Sentences longer than ~25 words are subdivided at clause boundaries (commas, semicolons, em dashes) or at the 20-word mark if no clause boundary exists
 - Consecutive short sentences under ~8 words are merged into one segment
 - Segments that are purely annotations (`[like this]`) or emoji-only are excluded from similarity matching
@@ -105,9 +105,11 @@ These thresholds are starting points and will need tuning.
 ### 5. Hold Buffer
 
 When in hold state:
-- The last ~5 seconds of transcription chunks are buffered
+- Transcription chunks are buffered with timestamps (wall clock at time of recognition callback)
+- Chunks older than 5 seconds are evicted on each new arrival
 - On each new chunk, the buffer is concatenated and re-evaluated as a single string
 - This catches transitions back to script that span multiple short utterances
+- The buffer is cleared on: forward/backward match accepted, `jumpTo()`, `loadScript()`, or `reset()`
 
 ## CoreML Model Management
 
@@ -148,7 +150,8 @@ Mean pooling across non-padding tokens, then L2 normalization so cosine similari
 
 ### What Gets Removed
 
-- `charLevelMatch()`, `wordLevelMatch()`, `isFuzzyMatch()`, `editDistance()`, normalization helper (~215 lines)
+- `charLevelMatch()`, `wordLevelMatch()`, `isAnnotationWord()`, `isFuzzyMatch()`, `editDistance()`, `normalize()` (~200 lines)
+- Properties `matchStartOffset` and `normalizedSource` — no longer needed since the tracker owns positional state
 
 ### What Gets Rewritten
 
@@ -162,7 +165,7 @@ private func matchCharacters(spoken: String) {
     case .forward:
         recognizedCharCount = min(result.charOffset, sourceText.count)
     case .backward:
-        recognizedCharCount = result.charOffset
+        recognizedCharCount = max(0, min(result.charOffset, sourceText.count))
     case .hold:
         break
     }
@@ -171,8 +174,20 @@ private func matchCharacters(spoken: String) {
 
 ### What Gets Modified
 
-- `jumpTo(charOffset:)` additionally calls `tracker.jumpTo(charOffset:)` to recenter the sliding window
-- `start(with:)` calls `tracker.loadScript(text)` which triggers segmentation and background embedding
+- `jumpTo(charOffset:)` — additionally calls `tracker.jumpTo(charOffset:)` to recenter the sliding window. Remove `matchStartOffset` usage.
+- `start(with:)` — calls `tracker.loadScript(text)` which triggers segmentation and background embedding. Note: `start` preprocesses text through `splitTextIntoWords()` which collapses whitespace and removes newlines. The tracker receives this preprocessed `sourceText`, so segmentation uses punctuation-based sentence boundaries (not newlines).
+- `resume()` — calls `tracker.jumpTo(charOffset: recognizedCharCount)` to recenter the window after recognition restarts. Remove `matchStartOffset` usage.
+- `updateText(_:preservingCharCount:)` — calls `tracker.loadScript()` with the new text and `tracker.jumpTo()` to maintain position. Since Director Mode may call this on every keystroke, `loadScript()` debounces re-embedding internally (300ms delay, cancelling previous pending work).
+
+### Threading & Initialization
+
+- `loadScript()` returns synchronously but kicks off background embedding
+- `match(spoken:)` returns `.hold` until embedding is complete — the caller sees no movement until the model is ready
+- The `SemanticScriptTracker` uses a serial dispatch queue for embedding work; segment data is only mutated on that queue and read-copied for `match()` calls on main
+
+### Fallback Strategy
+
+`FuzzyScriptTracker` is used automatically if the CoreML model fails to load (missing `.mlmodelc` file, unsupported hardware). `SpeechRecognizer` attempts to create `SemanticScriptTracker` and falls back to `FuzzyScriptTracker` on failure, logging a warning.
 
 ### What Stays Unchanged
 
@@ -197,7 +212,7 @@ private func matchCharacters(spoken: String) {
 
 | File | Change |
 |------|--------|
-| `SpeechRecognizer.swift` | Remove ~215 lines of matching, add tracker delegation |
+| `SpeechRecognizer.swift` | Remove ~200 lines of matching, add tracker delegation, update `resume()` and `updateText()` |
 
 ### Bundle Additions
 
