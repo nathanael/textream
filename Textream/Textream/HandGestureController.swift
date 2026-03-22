@@ -71,15 +71,6 @@ class HandGestureController: NSObject {
         guard session.canAddOutput(videoOutput) else { return }
         session.addOutput(videoOutput)
 
-        // Limit frame rate to ~15fps to save CPU
-        if let connection = videoOutput.connection(with: .video) {
-            connection.isEnabled = true
-        }
-        try? camera.lockForConfiguration()
-        camera.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 15)
-        camera.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 15)
-        camera.unlockForConfiguration()
-
         captureSession = session
 
         processingQueue.async {
