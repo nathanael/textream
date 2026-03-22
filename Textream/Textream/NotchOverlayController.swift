@@ -48,6 +48,9 @@ class NotchOverlayController: NSObject {
     private var panel: NSPanel?
     let speechRecognizer = SpeechRecognizer()
     let handGestureController = HandGestureController()
+    private var rewindTimer: Timer?
+    private var indicatorWindow: NSWindow?
+    private var indicatorView: NSHostingView<HandIndicatorView>?
     let overlayContent = OverlayContent()
     var onComplete: (() -> Void)?
     var onNextPage: (() -> Void)?
@@ -119,7 +122,87 @@ class NotchOverlayController: NSObject {
             speechRecognizer.start(with: text)
         }
 
+        handGestureController.onHandStateChanged = { [weak self] raised, height in
+            self?.handleHandGesture(raised: raised, height: height)
+        }
         handGestureController.start()
+    }
+
+    private func handleHandGesture(raised: Bool, height: Float) {
+        let settings = NotchSettings.shared
+        HandGestureController.log("[Controller] handleHandGesture raised=\(raised) height=\(height) mode=\(settings.listeningMode.rawValue)")
+
+        if raised {
+            showHandIndicator()
+
+            // Pause current mode
+            speechRecognizer.pauseForRewind()
+
+            // Start rewind timer
+            rewindTimer?.invalidate()
+            rewindTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                let h = self.handGestureController.handHeight
+                let words: Int
+                if h < 0.3 { words = 1 }
+                else if h < 0.7 { words = 2 }
+                else { words = 4 }
+
+                self.speechRecognizer.rewindByWords(words)
+            }
+        } else {
+            HandGestureController.log("[Controller] hiding indicator, window=\(indicatorWindow != nil)")
+            hideHandIndicator()
+
+            // Stop rewind
+            rewindTimer?.invalidate()
+            rewindTimer = nil
+
+            HandGestureController.log("[Controller] calling resumeAfterRewind, isListening=\(speechRecognizer.isListening)")
+            switch settings.listeningMode {
+            case .wordTracking:
+                speechRecognizer.resumeAfterRewind()
+                HandGestureController.log("[Controller] resumeAfterRewind called, isListening=\(speechRecognizer.isListening)")
+            case .classic, .silencePaused:
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                    self?.speechRecognizer.resumeAfterRewind()
+                }
+            }
+        }
+    }
+
+    private func showHandIndicator() {
+        guard indicatorWindow == nil else { return }
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+
+        let size: CGFloat = 60
+        let margin: CGFloat = 20
+        let frame = NSRect(
+            x: screen.frame.maxX - size - margin,
+            y: screen.frame.maxY - size - margin - 30,  // below menu bar
+            width: size,
+            height: size
+        )
+
+        let window = NSWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.level = NSWindow.Level(Int(CGShieldingWindowLevel()) + 1)
+        window.ignoresMouseEvents = true
+        window.hasShadow = false
+
+        let hostView = NSHostingView(rootView: HandIndicatorView(isRewinding: true))
+        window.contentView = hostView
+        window.orderFront(nil)
+
+        indicatorWindow = window
+        indicatorView = hostView
+    }
+
+    private func hideHandIndicator() {
+        indicatorWindow?.orderOut(nil)
+        indicatorWindow = nil
+        indicatorView = nil
     }
 
     func updateContent(text: String, hasNextPage: Bool) {
@@ -385,6 +468,9 @@ class NotchOverlayController: NSObject {
         speechRecognizer.shouldDismiss = true
         speechRecognizer.forceStop()
         handGestureController.stop()
+        hideHandIndicator()
+        rewindTimer?.invalidate()
+        rewindTimer = nil
 
         // Wait for animation, then remove panel
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
@@ -424,6 +510,9 @@ class NotchOverlayController: NSObject {
         cancellables.removeAll()
         speechRecognizer.forceStop()
         handGestureController.stop()
+        hideHandIndicator()
+        rewindTimer?.invalidate()
+        rewindTimer = nil
         speechRecognizer.recognizedCharCount = 0
         panel?.orderOut(nil)
         panel = nil
@@ -609,6 +698,43 @@ struct DynamicIslandShape: Shape {
     }
 }
 
+// MARK: - Hand Gesture Indicator
+
+struct HandIndicatorView: View {
+    let isRewinding: Bool
+
+    @State private var rotation: Double = 0
+
+    var body: some View {
+        ZStack {
+            // Background circle
+            Circle()
+                .stroke(Color.white.opacity(0.3), lineWidth: 3)
+                .frame(width: 44, height: 44)
+
+            // Animated arc
+            Circle()
+                .trim(from: 0, to: 0.7)
+                .stroke(Color.green, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                .frame(width: 44, height: 44)
+                .rotationEffect(.degrees(rotation))
+
+            // Rewind icon
+            Image(systemName: "backward.fill")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundColor(.green)
+        }
+        .frame(width: 60, height: 60)
+        .background(Color.black.opacity(0.6))
+        .clipShape(Circle())
+        .onAppear {
+            withAnimation(.linear(duration: 1).repeatForever(autoreverses: false)) {
+                rotation = -360
+            }
+        }
+    }
+}
+
 // MARK: - Overlay SwiftUI View
 
 struct NotchOverlayView: View {
@@ -638,8 +764,6 @@ struct NotchOverlayView: View {
     private let scrollTimer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
 
     // Hand-gesture rewind state
-    @State private var rewindTimer: Timer?
-    @State private var resumeDelay: DispatchWorkItem?
 
     // Auto next page countdown
     @State private var countdownRemaining: Int = 0
@@ -656,11 +780,6 @@ struct NotchOverlayView: View {
         NotchSettings.shared.listeningMode
     }
 
-    private func rewindWordsPerTick(handHeight: Float) -> Int {
-        if handHeight < 0.3 { return 1 }
-        if handHeight < 0.7 { return 2 }
-        return 4
-    }
 
     /// Convert fractional word index to char offset using actual word lengths
     private func charOffsetForWordProgress(_ progress: Double) -> Int {
@@ -817,55 +936,6 @@ struct NotchOverlayView: View {
         }
         .onChange(of: content.totalCharCount) { _, _ in
             timerWordProgress = 0
-        }
-        .onChange(of: handGesture.isHandRaised) { _, raised in
-            if raised {
-                resumeDelay?.cancel()
-                resumeDelay = nil
-
-                switch listeningMode {
-                case .wordTracking:
-                    speechRecognizer.pauseForRewind()
-                case .classic:
-                    isPaused = true
-                case .silencePaused:
-                    speechRecognizer.pauseForRewind()
-                    isPaused = true
-                }
-
-                rewindTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
-                    let words = rewindWordsPerTick(handHeight: handGesture.handHeight)
-                    switch listeningMode {
-                    case .wordTracking:
-                        speechRecognizer.rewindByWords(words)
-                    case .classic, .silencePaused:
-                        timerWordProgress = max(0, timerWordProgress - Double(words))
-                    }
-                }
-            } else {
-                rewindTimer?.invalidate()
-                rewindTimer = nil
-
-                switch listeningMode {
-                case .wordTracking:
-                    speechRecognizer.resumeAfterRewind()
-                case .classic:
-                    let work = DispatchWorkItem { isPaused = false }
-                    resumeDelay = work
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
-                case .silencePaused:
-                    speechRecognizer.resumeAfterRewind()
-                    let work = DispatchWorkItem { isPaused = false }
-                    resumeDelay = work
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
-                }
-            }
-        }
-        .onDisappear {
-            rewindTimer?.invalidate()
-            rewindTimer = nil
-            resumeDelay?.cancel()
-            resumeDelay = nil
         }
     }
 
@@ -1226,18 +1296,11 @@ struct FloatingOverlayView: View {
     private let scrollTimer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
 
     // Hand-gesture rewind state
-    @State private var rewindTimer: Timer?
-    @State private var resumeDelay: DispatchWorkItem?
 
     private var listeningMode: ListeningMode {
         NotchSettings.shared.listeningMode
     }
 
-    private func rewindWordsPerTick(handHeight: Float) -> Int {
-        if handHeight < 0.3 { return 1 }
-        if handHeight < 0.7 { return 2 }
-        return 4
-    }
 
     /// Convert fractional word index to char offset using actual word lengths
     private func charOffsetForWordProgress(_ progress: Double) -> Int {
@@ -1371,55 +1434,6 @@ struct FloatingOverlayView: View {
         }
         .onChange(of: content.totalCharCount) { _, _ in
             timerWordProgress = 0
-        }
-        .onChange(of: handGesture.isHandRaised) { _, raised in
-            if raised {
-                resumeDelay?.cancel()
-                resumeDelay = nil
-
-                switch listeningMode {
-                case .wordTracking:
-                    speechRecognizer.pauseForRewind()
-                case .classic:
-                    isPaused = true
-                case .silencePaused:
-                    speechRecognizer.pauseForRewind()
-                    isPaused = true
-                }
-
-                rewindTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
-                    let words = rewindWordsPerTick(handHeight: handGesture.handHeight)
-                    switch listeningMode {
-                    case .wordTracking:
-                        speechRecognizer.rewindByWords(words)
-                    case .classic, .silencePaused:
-                        timerWordProgress = max(0, timerWordProgress - Double(words))
-                    }
-                }
-            } else {
-                rewindTimer?.invalidate()
-                rewindTimer = nil
-
-                switch listeningMode {
-                case .wordTracking:
-                    speechRecognizer.resumeAfterRewind()
-                case .classic:
-                    let work = DispatchWorkItem { isPaused = false }
-                    resumeDelay = work
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
-                case .silencePaused:
-                    speechRecognizer.resumeAfterRewind()
-                    let work = DispatchWorkItem { isPaused = false }
-                    resumeDelay = work
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
-                }
-            }
-        }
-        .onDisappear {
-            rewindTimer?.invalidate()
-            rewindTimer = nil
-            resumeDelay?.cancel()
-            resumeDelay = nil
         }
     }
 

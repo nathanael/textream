@@ -240,6 +240,7 @@ class SpeechRecognizer {
     func resumeAfterRewind() {
         matchStartOffset = recognizedCharCount
         retryCount = 0
+        isListening = true
         beginRecognition()
     }
 

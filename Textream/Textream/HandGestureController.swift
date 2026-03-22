@@ -4,77 +4,126 @@ import AppKit
 
 @Observable
 class HandGestureController: NSObject {
-    var isHandRaised: Bool = false
+    private static let logFile: FileHandle? = {
+        let path = "/tmp/textream_hand.log"
+        FileManager.default.createFile(atPath: path, contents: nil)
+        return FileHandle(forWritingAtPath: path)
+    }()
+
+    static func log(_ msg: String) {
+        let line = "\(Date()): \(msg)\n"
+        logFile?.seekToEndOfFile()
+        logFile?.write(line.data(using: .utf8)!)
+    }
+    var isHandRaised: Bool = false {
+        didSet {
+            if isHandRaised != oldValue {
+                onHandStateChanged?(isHandRaised, handHeight)
+            }
+        }
+    }
     var handHeight: Float = 0.0  // 0.0 = just above threshold, 1.0 = top of frame
 
+    /// Called on main thread when hand raise state changes. (raised, height)
+    var onHandStateChanged: ((Bool, Float) -> Void)?
+
     private var captureSession: AVCaptureSession?
-    private let videoOutput = AVCaptureVideoDataOutput()
+    private var videoOutput = AVCaptureVideoDataOutput()
     private let processingQueue = DispatchQueue(label: "com.textream.handgesture", qos: .userInteractive)
     private let handPoseRequest = VNDetectHumanHandPoseRequest()
 
-    private let raiseThreshold: Float = 0.6  // wrist Y must exceed this to count as raised
+    private let raiseThreshold: Float = 0.25  // wrist Y must exceed this to trigger raise
+    private let lowerThreshold: Float = 0.20  // wrist Y must drop below this to trigger lower (hysteresis)
     private var recentWristY: [Float] = []   // rolling buffer for smoothing
     private let smoothingWindow = 4
 
     private var isRunning = false
+    private var frameCount = 0
 
     override init() {
         super.init()
         handPoseRequest.maximumHandCount = 2
+        Self.log("[HandGesture] init()")
     }
 
     func start() {
-        guard !isRunning else { return }
+        guard !isRunning else {
+            Self.log("[HandGesture] start() skipped — already running")
+            return
+        }
 
-        // Check camera permission
-        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        let status = AVCaptureDevice.authorizationStatus(for: .video)
+        Self.log("[HandGesture] start() called, auth status=\(status.rawValue)")
+        switch status {
         case .authorized:
             setupAndStart()
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+                Self.log("[HandGesture] camera permission granted=\(granted)")
                 if granted {
                     DispatchQueue.main.async { self?.setupAndStart() }
                 }
             }
         default:
-            // Permission denied or restricted — silently disable
+            Self.log("[HandGesture] camera permission denied/restricted")
             return
         }
     }
 
     func stop() {
         guard isRunning else { return }
+        Self.log("[HandGesture] stop()")
+        // Clear callback first to prevent triggering rewind logic during teardown
+        let savedCallback = onHandStateChanged
+        onHandStateChanged = nil
+
         captureSession?.stopRunning()
+        captureSession = nil  // release session so videoOutput can be re-added later
         isRunning = false
         isHandRaised = false
         handHeight = 0.0
         recentWristY = []
+
+        // Restore callback for next start
+        onHandStateChanged = savedCallback
     }
 
     private func setupAndStart() {
+        Self.log("[HandGesture] setupAndStart()")
         let session = AVCaptureSession()
-        session.sessionPreset = .low  // ~640x480, minimal resource usage
+        session.sessionPreset = .low
 
-        // Find front-facing camera
         guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
                 ?? AVCaptureDevice.default(for: .video) else {
-            // No camera available — silently disable
+            Self.log("[HandGesture] No camera found")
             return
         }
+        Self.log("[HandGesture] Using camera: \(camera.localizedName)")
 
-        guard let input = try? AVCaptureDeviceInput(device: camera) else { return }
-        guard session.canAddInput(input) else { return }
+        guard let input = try? AVCaptureDeviceInput(device: camera) else {
+            Self.log("[HandGesture] Failed to create camera input")
+            return
+        }
+        guard session.canAddInput(input) else {
+            Self.log("[HandGesture] Cannot add input to session")
+            return
+        }
         session.addInput(input)
 
+        videoOutput = AVCaptureVideoDataOutput()
         videoOutput.setSampleBufferDelegate(self, queue: processingQueue)
         videoOutput.alwaysDiscardsLateVideoFrames = true
-        guard session.canAddOutput(videoOutput) else { return }
+        guard session.canAddOutput(videoOutput) else {
+            Self.log("[HandGesture] Cannot add output to session")
+            return
+        }
         session.addOutput(videoOutput)
 
         captureSession = session
 
         processingQueue.async {
             session.startRunning()
+            Self.log("[HandGesture] session.startRunning() completed")
         }
         isRunning = true
     }
@@ -82,6 +131,10 @@ class HandGestureController: NSObject {
 
 extension HandGestureController: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        frameCount += 1
+        if frameCount % 30 == 1 {
+            Self.log("[HandGesture] frame \(frameCount) received")
+        }
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
@@ -99,7 +152,8 @@ extension HandGestureController: AVCaptureVideoDataOutputSampleBufferDelegate {
         for hand in results {
             if let wrist = try? hand.recognizedPoint(.wrist),
                wrist.confidence > 0.3 {
-                let y = Float(wrist.location.y)  // Vision coords: 0=bottom, 1=top
+                let y = Float(wrist.location.y)
+                Self.log("[HandGesture] wrist y=\(String(format: "%.3f", y)) conf=\(String(format: "%.2f", wrist.confidence))")
                 if y > highestWristY {
                     highestWristY = y
                 }
@@ -113,27 +167,30 @@ extension HandGestureController: AVCaptureVideoDataOutputSampleBufferDelegate {
 
     private func updateWristPosition(_ wristY: Float?) {
         guard let y = wristY else {
-            // No hand detected — decay smoothly
             recentWristY = []
-            isHandRaised = false
             handHeight = 0.0
+            isHandRaised = false  // set after height so callback has correct height
             return
         }
 
-        // Smooth with rolling average
         recentWristY.append(y)
         if recentWristY.count > smoothingWindow {
             recentWristY.removeFirst()
         }
         let smoothed = recentWristY.reduce(0, +) / Float(recentWristY.count)
 
-        if smoothed > raiseThreshold {
+        // Hysteresis: raise at raiseThreshold, lower at lowerThreshold
+        if !isHandRaised && smoothed > raiseThreshold {
+            Self.log("[HandGesture] HAND RAISED (smoothed=\(String(format: "%.3f", smoothed)))")
+            handHeight = min(1.0, (smoothed - lowerThreshold) / (1.0 - lowerThreshold))
             isHandRaised = true
-            // Map threshold..1.0 → 0.0..1.0
-            handHeight = min(1.0, (smoothed - raiseThreshold) / (1.0 - raiseThreshold))
-        } else {
-            isHandRaised = false
+        } else if isHandRaised && smoothed < lowerThreshold {
+            Self.log("[HandGesture] HAND LOWERED (smoothed=\(String(format: "%.3f", smoothed)))")
             handHeight = 0.0
+            isHandRaised = false
+        } else if isHandRaised {
+            // Update height while raised (for speed control)
+            handHeight = min(1.0, (smoothed - lowerThreshold) / (1.0 - lowerThreshold))
         }
     }
 }
