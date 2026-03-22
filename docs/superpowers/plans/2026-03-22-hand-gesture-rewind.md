@@ -278,13 +278,18 @@ Add directly after `pauseForRewind()`:
 ```swift
     /// Move recognizedCharCount backward by N words. Used during gesture rewind.
     func rewindByWords(_ count: Int) {
+        // Work with the string as an array for O(1) indexing
+        let chars = Array(sourceText)
         var remaining = count
         var offset = recognizedCharCount
 
         while remaining > 0 && offset > 0 {
-            offset -= 1
-            // Skip to start of current word (find previous space or beginning)
-            while offset > 0 && sourceText[sourceText.index(sourceText.startIndex, offsetBy: offset)] != " " {
+            // Skip any spaces at current position
+            while offset > 0 && chars[offset - 1] == " " {
+                offset -= 1
+            }
+            // Skip to start of current word
+            while offset > 0 && chars[offset - 1] != " " {
                 offset -= 1
             }
             remaining -= 1
@@ -347,21 +352,19 @@ let handGestureController = HandGestureController()
 
 - [ ] **Step 2: Start/stop camera with reading sessions**
 
-Find `displayContent()` (around line 100) — after the existing `speechRecognizer.start(with:)` call (line 118), add:
+Find `show(text:hasNextPage:onComplete:)` (line 62) — after the existing `speechRecognizer.start(with:)` call (line 118), add:
 
 ```swift
 handGestureController.start()
 ```
 
-Find `updateContent()` (around line 130) — similarly add `handGestureController.start()` after the recognizer start.
+Find `updateContent(text:hasNextPage:)` (line 122) — similarly add `handGestureController.start()` after the recognizer start.
 
-Find where reading stops — in the stop button action and `forceStop` paths, add:
+Find `dismiss()` (line 376) and `forceClose()` (line 411) — add to both:
 
 ```swift
 handGestureController.stop()
 ```
-
-Also add `handGestureController.stop()` in `cleanupOverlay()` or wherever the overlay is dismissed.
 
 - [ ] **Step 3: Pass HandGestureController to NotchOverlayView**
 
@@ -403,19 +406,22 @@ Add `onChange` handlers in the view body (inside the main container, near the ex
 
         // Pause current mode
         switch listeningMode {
-        case .wordTracking, .silencePaused:
+        case .wordTracking:
             speechRecognizer.pauseForRewind()
         case .classic:
             isPaused = true
+        case .silencePaused:
+            speechRecognizer.pauseForRewind()
+            isPaused = true  // also pause the scroll timer
         }
 
         // Start rewind timer
         rewindTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
             let words = rewindWordsPerTick(handHeight: handGesture.handHeight)
             switch listeningMode {
-            case .wordTracking, .silencePaused:
+            case .wordTracking:
                 speechRecognizer.rewindByWords(words)
-            case .classic:
+            case .classic, .silencePaused:
                 timerWordProgress = max(0, timerWordProgress - Double(words))
             }
         }
@@ -428,14 +434,23 @@ Add `onChange` handlers in the view body (inside the main container, near the ex
         switch listeningMode {
         case .wordTracking:
             speechRecognizer.resumeAfterRewind()
+        case .classic:
+            let work = DispatchWorkItem { isPaused = false }
+            resumeDelay = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
         case .silencePaused:
             speechRecognizer.resumeAfterRewind()
-        case .classic:
             let work = DispatchWorkItem { isPaused = false }
             resumeDelay = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
         }
     }
+}
+.onDisappear {
+    rewindTimer?.invalidate()
+    rewindTimer = nil
+    resumeDelay?.cancel()
+    resumeDelay = nil
 }
 ```
 
@@ -445,8 +460,12 @@ Apply the same changes to `FloatingOverlayView` (starts around line 1136):
 - Add `handGesture: HandGestureController` property
 - Add `rewindTimer`, `resumeDelay` state
 - Add `rewindWordsPerTick` helper
-- Add the same `onChange(of: handGesture.isHandRaised)` handler
+- Add the same `onChange(of: handGesture.isHandRaised)` handler with `.onDisappear` cleanup
 - Pass `handGestureController` from where `FloatingOverlayView` is created
+
+**Finding all view instantiation sites:** Search `NotchOverlayController.swift` for `NotchOverlayView(` and `FloatingOverlayView(` to find every place these views are created. Each call site must pass the `handGestureController`. There are typically 1-2 sites per view (in `showPinned`, `showFollowCursor`, `showFloating`, etc.).
+
+**Note:** Fullscreen mode uses `ExternalDisplayView` which is not addressed in this plan — gesture rewind in fullscreen is a future enhancement.
 
 - [ ] **Step 6: Verify build**
 
