@@ -1376,6 +1376,7 @@ struct SettingsView: View {
         settings.autoNextPageDelay = 3
         settings.browserServerEnabled = false
         settings.browserServerPort = 7373
+        settings.browserFontSizePreset = .lg
         settings.directorModeEnabled = false
         settings.directorServerPort = 7575
     }
