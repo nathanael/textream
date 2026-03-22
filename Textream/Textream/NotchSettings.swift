@@ -7,32 +7,6 @@
 
 import SwiftUI
 
-// MARK: - Font Size Preset
-
-enum FontSizePreset: String, CaseIterable, Identifiable {
-    case xs, sm, lg, xl
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .xs: return "XS"
-        case .sm: return "SM"
-        case .lg: return "LG"
-        case .xl: return "XL"
-        }
-    }
-
-    var pointSize: CGFloat {
-        switch self {
-        case .xs: return 14
-        case .sm: return 16
-        case .lg: return 20
-        case .xl: return 24
-        }
-    }
-}
-
 // MARK: - Font Family Preset
 
 enum FontFamilyPreset: String, CaseIterable, Identifiable {
@@ -354,19 +328,19 @@ enum ListeningMode: String, CaseIterable, Identifiable {
 class NotchSettings {
     static let shared = NotchSettings()
 
-    var notchWidth: CGFloat {
-        didSet { UserDefaults.standard.set(Double(notchWidth), forKey: "notchWidth") }
+    var windowWidthPercent: CGFloat {
+        didSet { UserDefaults.standard.set(Double(windowWidthPercent), forKey: "windowWidthPercent") }
     }
-    var textAreaHeight: CGFloat {
-        didSet { UserDefaults.standard.set(Double(textAreaHeight), forKey: "textAreaHeight") }
+    var windowHeightPercent: CGFloat {
+        didSet { UserDefaults.standard.set(Double(windowHeightPercent), forKey: "windowHeightPercent") }
     }
 
     var speechLocale: String {
         didSet { UserDefaults.standard.set(speechLocale, forKey: "speechLocale") }
     }
 
-    var fontSizePreset: FontSizePreset {
-        didSet { UserDefaults.standard.set(fontSizePreset.rawValue, forKey: "fontSizePreset") }
+    var fontSize: CGFloat {
+        didSet { UserDefaults.standard.set(Double(fontSize), forKey: "fontSize") }
     }
 
     var fontFamilyPreset: FontFamilyPreset {
@@ -485,25 +459,22 @@ class NotchSettings {
     }
 
     var font: NSFont {
-        fontFamilyPreset.font(size: fontSizePreset.pointSize)
+        fontFamilyPreset.font(size: fontSize)
     }
 
-    static let defaultWidth: CGFloat = 340
-    static let defaultHeight: CGFloat = 150
+    static let defaultWindowWidthPercent: CGFloat = 0.45
+    static let defaultWindowHeightPercent: CGFloat = 0.4
+    static let defaultFontSize: CGFloat = 20
     static let defaultLocale: String = Locale.current.identifier
 
-    static let minWidth: CGFloat = 310
-    static let maxWidth: CGFloat = 500
-    static let minHeight: CGFloat = 100
-    static let maxHeight: CGFloat = 400
-
     init() {
-        let savedWidth = UserDefaults.standard.double(forKey: "notchWidth")
-        let savedHeight = UserDefaults.standard.double(forKey: "textAreaHeight")
-        self.notchWidth = savedWidth > 0 ? CGFloat(savedWidth) : Self.defaultWidth
-        self.textAreaHeight = savedHeight > 0 ? CGFloat(savedHeight) : Self.defaultHeight
+        let savedWidthPercent = UserDefaults.standard.double(forKey: "windowWidthPercent")
+        self.windowWidthPercent = savedWidthPercent > 0 ? CGFloat(savedWidthPercent) : Self.defaultWindowWidthPercent
+        let savedHeightPercent = UserDefaults.standard.double(forKey: "windowHeightPercent")
+        self.windowHeightPercent = savedHeightPercent > 0 ? CGFloat(savedHeightPercent) : Self.defaultWindowHeightPercent
         self.speechLocale = UserDefaults.standard.string(forKey: "speechLocale") ?? Self.defaultLocale
-        self.fontSizePreset = FontSizePreset(rawValue: UserDefaults.standard.string(forKey: "fontSizePreset") ?? "") ?? .lg
+        let savedFontSize = UserDefaults.standard.double(forKey: "fontSize")
+        self.fontSize = savedFontSize > 0 ? CGFloat(savedFontSize) : Self.defaultFontSize
         self.fontFamilyPreset = FontFamilyPreset(rawValue: UserDefaults.standard.string(forKey: "fontFamilyPreset") ?? "") ?? .sans
         self.fontColorPreset = FontColorPreset(rawValue: UserDefaults.standard.string(forKey: "fontColorPreset") ?? "") ?? .white
         self.cueColorPreset = FontColorPreset(rawValue: UserDefaults.standard.string(forKey: "cueColorPreset") ?? "") ?? .white
